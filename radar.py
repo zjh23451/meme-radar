@@ -8,10 +8,10 @@ TG_CHAT_ID = os.environ["TG_CHAT_ID"]
 
 STATE_FILE = "seen.json"
 
-# ========= 测试版低门槛 =========
-MCAP_MIN = 100_000       # 最小市值：10万美元
-VOL1H_MIN = 10_000       # 1小时成交额：1万美元
-LIQ_MIN = 1_000          # 最小流动性：1000美元
+# ========= 正式版筛选条件 =========
+MCAP_MIN = 1_000_000      # 最小市值：100万美元
+VOL1H_MIN = 1_000_000     # 1小时成交额：100万美元
+LIQ_MIN = 10_000          # 最小流动性：1万美元
 
 CHAINS = ["ethereum", "solana", "bsc"]
 
@@ -24,6 +24,7 @@ GOPLUS_CHAIN = {
 
 def send_tg(msg):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+
     payload = {
         "chat_id": TG_CHAT_ID,
         "text": msg,
@@ -47,8 +48,10 @@ def fmt(n):
 
     if n >= 1_000_000_000:
         return f"${n / 1_000_000_000:.2f}B"
+
     if n >= 1_000_000:
         return f"${n / 1_000_000:.2f}M"
+
     if n >= 1_000:
         return f"${n / 1_000:.1f}K"
 
@@ -145,6 +148,7 @@ def fetch(chain):
         return []
 
 
+# ========= 读取 seen.json =========
 try:
     with open(STATE_FILE, "r", encoding="utf-8") as f:
         seen = set(json.load(f))
@@ -206,33 +210,7 @@ for chain in CHAINS:
         }.get(chain, chain.upper())
 
         alert = (
-            f"🔥 <b>测试信号 [{tag}]</b>\n"
+            f"🔥 <b>新信号 [{tag}]</b>\n"
             f"代币：<b>{token_name}</b>\n"
             f"符号：<b>${sym}</b>\n"
             f"链：<b>{chain}</b>\n"
-            f"CA：<code>{token_addr}</code>\n"
-            f"Pair：<code>{pid}</code>\n"
-            f"市值：{fmt(mcap)}\n"
-            f"1H成交额：{fmt(vol1h)}\n"
-            f"流动性：{fmt(liq)}\n"
-            f"1H涨跌：{'🟢+' if chg >= 0 else '🔴'}{chg:.1f}%\n"
-            f"✅ 貔貅检测：通过\n"
-            f"🔗 <a href='{url}'>DEX Screener</a>"
-        )
-
-        alerts.append(alert)
-
-
-for msg in alerts:
-    send_tg(msg)
-    time.sleep(0.5)
-
-
-try:
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(seen)[-500:], f, ensure_ascii=False, indent=2)
-except Exception as e:
-    print("保存 seen.json 失败：", e)
-
-
-print(f"完成，测试信号 {len(alerts)} 个")
