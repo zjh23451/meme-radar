@@ -4,9 +4,9 @@ TG_TOKEN   = os.environ["TG_TOKEN"]
 TG_CHAT_ID = os.environ["TG_CHAT_ID"]
 STATE_FILE = "seen.json"
 
-MCAP_MIN  = 1_000_000
-VOL1H_MIN = 1_000_000
-LIQ_MIN   = 10_000
+MCAP_MIN  = 1_000_00
+VOL1H_MIN = 1_000_00
+LIQ_MIN   = 10_00
 CHAINS    = ["ethereum", "solana", "bsc"]
 
 GOPLUS_CHAIN = {
