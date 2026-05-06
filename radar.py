@@ -214,3 +214,31 @@ for chain in CHAINS:
             f"代币：<b>{token_name}</b>\n"
             f"符号：<b>${sym}</b>\n"
             f"链：<b>{chain}</b>\n"
+            f"CA：<code>{token_addr}</code>\n"
+            f"Pair：<code>{pid}</code>\n"
+            f"市值：{fmt(mcap)}\n"
+            f"1H成交额：{fmt(vol1h)}\n"
+            f"流动性：{fmt(liq)}\n"
+            f"1H涨跌：{'🟢+' if chg >= 0 else '🔴'}{chg:.1f}%\n"
+            f"✅ 貔貅检测：通过\n"
+            f"🔗 <a href='{url}'>DEX Screener</a>"
+        )
+
+        alerts.append(alert)
+
+
+# ========= 发送 TG =========
+for msg in alerts:
+    send_tg(msg)
+    time.sleep(0.5)
+
+
+# ========= 保存 seen.json =========
+try:
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(seen)[-500:], f, ensure_ascii=False, indent=2)
+except Exception as e:
+    print("保存 seen.json 失败：", e)
+
+
+print(f"完成，新信号 {len(alerts)} 个")
