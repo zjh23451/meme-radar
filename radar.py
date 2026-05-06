@@ -1,31 +1,23 @@
 import requests, os, json, time
 
-TG_TOKEN   = os.environ["TG_TOKEN"]
-TG_CHAT_ID = os.environ["TG_CHAT_ID"]
-STATE_FILE = "seen.json"
+TG_TOKEN    = os.environ["TG_TOKEN"]
+TG_CHAT_ID  = os.environ["TG_CHAT_ID"]
+AVE_API_KEY = os.environ["AVE_API_KEY"]
+STATE_FILE  = "seen.json"
 
 # ── 过滤条件 ──────────────────────────
-MCAP_MIN   = 1_000_000      # 市值 ≥ $1M
-VOL5M_MIN  = 100_000        # 5分钟成交额 ≥ $100k
-LIQ_MIN    = 30_000         # 流动性 ≥ $30k
-CHG5M_MIN  = 0              # 5分钟涨幅 > 0
-CHG1H_MIN  = 0              # 1小时涨幅 > 0
+MCAP_MIN   = 1_000_000     # 市值 ≥ $1M
+VOL5M_MIN  = 100_000       # 5M 成交额 ≥ $100k
+LIQ_MIN    = 30_000        # 流动性 ≥ $30k
+CHG5M_MIN  = 0             # 5M 涨幅 > 0
+CHG1H_MIN  = 0             # 1H 涨幅 > 0
 
-# GeckoTerminal 链ID
-GT_CHAINS = {
-    "eth": "ETH",
-    "solana": "SOL",
-}
+CHAINS = ["solana", "eth"]
+CHAIN_LABEL = {"solana": "SOL", "eth": "ETH"}
 
-# DexScreener 链名映射（用于貔貅检测）
-DS_CHAIN_MAP = {
-    "eth": "ethereum",
-    "solana": "solana",
-}
-
-GOPLUS_CHAIN = {
-    "eth": "1",
-    "solana": "solana",
+HEADERS = {
+    "X-API-KEY": AVE_API_KEY,
+    "Accept": "application/json",
 }
 
 def send_tg(msg):
@@ -36,7 +28,8 @@ def send_tg(msg):
                   "parse_mode": "HTML", "disable_web_page_preview": True},
             timeout=10
         )
-    except: pass
+    except Exception as e:
+        print(f"TG发送失败: {e}")
 
 def fmt(n):
     n = float(n or 0)
@@ -45,141 +38,135 @@ def fmt(n):
     if n >= 1e3: return f"${n/1e3:.1f}K"
     return f"${n:.2f}"
 
-def is_honeypot(chain, token_address):
-    """通过 GoPlus 检查貔貅"""
-    goplus_chain = GOPLUS_CHAIN.get(chain)
-    if not goplus_chain or not token_address:
-        return False
+def safe_float(v, default=0):
+    try: return float(v or 0)
+    except: return default
+
+def fetch_trending(chain, page_size=50):
+    """获取链上热门代币榜单"""
+    tokens = []
     try:
-        if chain == "solana":
-            url = f"https://api.gopluslabs.io/api/v1/solana/token_security?contract_addresses={token_address}"
-        else:
-            url = f"https://api.gopluslabs.io/api/v1/token_security/{goplus_chain}?contract_addresses={token_address}"
-        r = requests.get(url, timeout=8)
-        if not r.ok: return False
-        data = r.json().get("result", {})
-        info = data.get(token_address.lower()) or data.get(token_address) or {}
-        if not info: return False
-        if str(info.get("is_honeypot", "0")) == "1":     return True
-        if str(info.get("cannot_sell_all", "0")) == "1": return True
-        if str(info.get("is_blacklisted", "0")) == "1":  return True
-        try:
-            if float(info.get("sell_tax", 0) or 0) > 0.10: return True
-            if float(info.get("buy_tax", 0)  or 0) > 0.10: return True
-        except: pass
-        return False
-    except:
-        return False
+        for page in range(0, 4):  # 拉 4 页 = 最多 200 个
+            url = f"https://prod.ave-api.com/v2/tokens/trending?chain={chain}&current_page={page}&page_size={page_size}"
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if not r.ok:
+                print(f"  [{chain}] trending p{page} HTTP {r.status_code}")
+                break
+            data = (r.json().get("data") or {})
+            page_tokens = data.get("tokens") or []
+            if not page_tokens:
+                break
+            tokens.extend(page_tokens)
+            if not data.get("next_page"):
+                break
+            time.sleep(0.5)
+    except Exception as e:
+        print(f"  [{chain}] trending 失败: {e}")
+    return tokens
 
-def fetch_gecko(chain, endpoint, pages=2):
-    """从 GeckoTerminal 拉取榜单"""
-    all_pools = []
-    for page in range(1, pages + 1):
-        try:
-            url = f"https://api.geckoterminal.com/api/v2/networks/{chain}/{endpoint}?page={page}"
-            r = requests.get(url, timeout=12, headers={"Accept": "application/json"})
-            if not r.ok: break
-            data = r.json().get("data", [])
-            if not data: break
-            all_pools.extend(data)
-            time.sleep(0.4)  # 避免限速
-        except:
-            break
-    return all_pools
+def fetch_rank(topic):
+    """获取分类榜单"""
+    try:
+        url = f"https://prod.ave-api.com/v2/ranks?topic={topic}&limit=200"
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if not r.ok:
+            print(f"  rank {topic} HTTP {r.status_code}")
+            return []
+        return r.json().get("data") or []
+    except Exception as e:
+        print(f"  rank {topic} 失败: {e}")
+        return []
 
-def parse_pool(pool, chain):
-    """解析 GeckoTerminal 池数据"""
-    attr = pool.get("attributes", {})
-    rel  = pool.get("relationships", {})
-
-    base_token_id = (rel.get("base_token", {}).get("data", {}) or {}).get("id", "")
-    token_addr = base_token_id.split("_", 1)[1] if "_" in base_token_id else ""
-
-    return {
-        "chain":      chain,
-        "pair_addr":  attr.get("address", ""),
-        "token_addr": token_addr,
-        "symbol":     (attr.get("name") or "").split(" / ")[0] or "???",
-        "price":      float(attr.get("base_token_price_usd") or 0),
-        "mcap":       float(attr.get("market_cap_usd") or attr.get("fdv_usd") or 0),
-        "liq":        float(attr.get("reserve_in_usd") or 0),
-        "vol5m":      float((attr.get("volume_usd") or {}).get("m5") or 0),
-        "vol1h":      float((attr.get("volume_usd") or {}).get("h1") or 0),
-        "chg5m":      float((attr.get("price_change_percentage") or {}).get("m5") or 0),
-        "chg1h":      float((attr.get("price_change_percentage") or {}).get("h1") or 0),
-        "url":        f"https://www.geckoterminal.com/{chain}/pools/{attr.get('address','')}",
-    }
-
-# ── 读取上次状态 ──
+# ── 读取已推送 ──
 try:
     seen = set(json.load(open(STATE_FILE)))
 except:
     seen = set()
 
-# ── 聚合双榜单 ──
-all_pools = []
+# ── 多榜单聚合 ──
+all_tokens = []
 seen_addrs = set()
 
-for chain in GT_CHAINS.keys():
-    # 按成交额榜单（top pools 按 24H 成交额排序，每页 20 个，拉 5 页 = 100 个）
-    top = fetch_gecko(chain, "pools", pages=5)
-    # 热门榜单
-    trend = fetch_gecko(chain, "trending_pools", pages=2)
-    # 最新池
-    new = fetch_gecko(chain, "new_pools", pages=2)
-
-    for pool in top + trend + new:
-        addr = (pool.get("attributes") or {}).get("address", "")
+for chain in CHAINS:
+    tokens = fetch_trending(chain)
+    print(f"[{chain}] trending: {len(tokens)}")
+    for t in tokens:
+        addr = t.get("token", "")
         if addr and addr not in seen_addrs:
             seen_addrs.add(addr)
-            all_pools.append((chain, pool))
+            all_tokens.append(t)
 
-print(f"聚合到 {len(all_pools)} 个交易对")
+for topic in ["hot", "gainer", "meme"]:
+    tokens = fetch_rank(topic)
+    print(f"[rank {topic}] {len(tokens)}")
+    for t in tokens:
+        addr = t.get("token", "")
+        chain = t.get("chain", "")
+        if addr and chain in CHAINS and addr not in seen_addrs:
+            seen_addrs.add(addr)
+            all_tokens.append(t)
+    time.sleep(0.5)
+
+print(f"\n聚合到 {len(all_tokens)} 个代币")
 
 alerts = []
 candidates = 0
 
-for chain, pool in all_pools:
-    try:
-        d = parse_pool(pool, chain)
-    except:
+for t in all_tokens:
+    chain = t.get("chain", "")
+    if chain not in CHAINS:
         continue
 
-    # ── 基础过滤 ──
-    if d["mcap"] < MCAP_MIN:    continue
-    if d["vol5m"] < VOL5M_MIN:  continue
-    if d["liq"] < LIQ_MIN:      continue
-    if d["chg5m"] <= CHG5M_MIN: continue
-    if d["chg1h"] <= CHG1H_MIN: continue
-    if d["pair_addr"] in seen:  continue
+    addr   = t.get("token", "")
+    mcap   = safe_float(t.get("market_cap") or t.get("fdv"))
+    liq    = safe_float(t.get("tvl") or t.get("main_pair_tvl"))
+    vol5m  = safe_float(t.get("token_tx_volume_usd_5m"))
+    vol1h  = safe_float(t.get("token_tx_volume_usd_1h"))
+    chg5m  = safe_float(t.get("token_price_change_5m"))
+    chg1h  = safe_float(t.get("token_price_change_1h"))
+    sym    = t.get("symbol", "???")
+
+    if mcap < MCAP_MIN:    continue
+    if vol5m < VOL5M_MIN:  continue
+    if liq < LIQ_MIN:      continue
+    if chg5m <= CHG5M_MIN: continue
+    if chg1h <= CHG1H_MIN: continue
+    if addr in seen:       continue
 
     candidates += 1
 
-    # ── 貔貅检测 ──
-    if is_honeypot(chain, d["token_addr"]):
-        print(f"[貔貅过滤] {d['symbol']} on {chain}")
+    # 安全检测
+    if t.get("is_honeypot") is True:
+        print(f"[貔貅过滤] {sym} on {chain}")
         continue
-    time.sleep(0.25)
+    if t.get("is_in_blacklist") is True:
+        print(f"[黑名单过滤] {sym} on {chain}")
+        continue
+    risk_level = t.get("ave_risk_level", 0)
+    if isinstance(risk_level, (int, float)) and risk_level >= 2:
+        print(f"[高风险过滤] {sym} 风险={risk_level}")
+        continue
 
-    seen.add(d["pair_addr"])
-    tag = GT_CHAINS.get(chain, chain.upper())
+    seen.add(addr)
+    tag = CHAIN_LABEL.get(chain, chain.upper())
+    risk_score = t.get("risk_score", "?")
 
     alerts.append(
         f"🔥 <b>新信号 [{tag}]</b>\n"
-        f"代币：<b>${d['symbol']}</b>\n"
-        f"市值：{fmt(d['mcap'])}\n"
-        f"5M成交额：{fmt(d['vol5m'])}\n"
-        f"1H成交额：{fmt(d['vol1h'])}\n"
-        f"流动性：{fmt(d['liq'])}\n"
-        f"5M涨幅：🟢 +{d['chg5m']:.1f}%\n"
-        f"1H涨幅:🟢 +{d['chg1h']:.1f}%\n"
-        f"✅ 貔貅检测：通过\n"
-        f"🔗 <a href='{d['url']}'>查看图表</a>"
+        f"代币：<b>${sym}</b>\n"
+        f"市值：{fmt(mcap)}\n"
+        f"流动性：{fmt(liq)}\n"
+        f"5M成交额：{fmt(vol5m)}\n"
+        f"1H成交额：{fmt(vol1h)}\n"
+        f"5M涨幅：🟢 +{chg5m:.1f}%\n"
+        f"1H涨幅：🟢 +{chg1h:.1f}%\n"
+        f"安全分：{risk_score} ✅\n"
+        f"🔗 <a href='https://ave.ai/token/{addr}-{chain}'>Ave.ai 查看</a>"
     )
 
 for msg in alerts:
     send_tg(msg)
     time.sleep(0.5)
 
-json.dump(list(seen)[-1500:], open(STATE_FILE, "w"))
-print(f"完成 | 聚合 {len(all_pools)} | 候选 {candidates} | 推送 {len(alerts)}")
+json.dump(list(seen)[-2000:], open(STATE_FILE, "w"))
+print(f"\n完成 | 聚合 {len(all_tokens)} | 候选 {candidates} | 推送 {len(alerts)}")
