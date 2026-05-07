@@ -10,7 +10,7 @@ MCAP_MIN   = 1_000_000     # 市值 ≥ $1M
 VOL5M_MIN  = 100_000       # 5M 成交额 ≥ $100k
 LIQ_MIN    = 30_000        # 流动性 ≥ $30k
 CHG5M_MIN  = 0             # 5M 涨幅 > 0
-CHG1H_MIN  = 0             # 1H 涨幅 > 0
+CHG1H_MIN  = 5             # 1H 涨幅 > 5
 
 # 去重窗口:同一代币 N 秒内不重复推送
 DEDUP_WINDOW_SEC = 24 * 3600   # 24 小时
