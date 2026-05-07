@@ -12,6 +12,9 @@ LIQ_MIN    = 30_000        # 流动性 ≥ $30k
 CHG5M_MIN  = 0             # 5M 涨幅 > 0
 CHG1H_MIN  = 0             # 1H 涨幅 > 0
 
+# 去重窗口:同一代币 N 秒内不重复推送
+DEDUP_WINDOW_SEC = 24 * 3600   # 24 小时
+
 CHAINS = ["solana", "eth"]
 CHAIN_LABEL = {"solana": "SOL", "eth": "ETH"}
 
@@ -43,10 +46,9 @@ def safe_float(v, default=0):
     except: return default
 
 def fetch_trending(chain, page_size=50):
-    """获取链上热门代币榜单"""
     tokens = []
     try:
-        for page in range(0, 4):  # 拉 4 页 = 最多 200 个
+        for page in range(0, 4):
             url = f"https://prod.ave-api.com/v2/tokens/trending?chain={chain}&current_page={page}&page_size={page_size}"
             r = requests.get(url, headers=HEADERS, timeout=15)
             if not r.ok:
@@ -65,7 +67,6 @@ def fetch_trending(chain, page_size=50):
     return tokens
 
 def fetch_rank(topic):
-    """获取分类榜单"""
     try:
         url = f"https://prod.ave-api.com/v2/ranks?topic={topic}&limit=200"
         r = requests.get(url, headers=HEADERS, timeout=15)
@@ -77,11 +78,18 @@ def fetch_rank(topic):
         print(f"  rank {topic} 失败: {e}")
         return []
 
-# ── 读取已推送 ──
+# ── 读取已推送状态(地址 -> 上次推送时间戳) ──
+now_ts = int(time.time())
+seen = {}
 try:
-    seen = set(json.load(open(STATE_FILE)))
+    raw = json.load(open(STATE_FILE))
+    if isinstance(raw, list):
+        # 兼容旧格式
+        seen = {addr: now_ts for addr in raw}
+    elif isinstance(raw, dict):
+        seen = {k: int(v) for k, v in raw.items()}
 except:
-    seen = set()
+    seen = {}
 
 # ── 多榜单聚合 ──
 all_tokens = []
@@ -131,7 +139,11 @@ for t in all_tokens:
     if liq < LIQ_MIN:      continue
     if chg5m <= CHG5M_MIN: continue
     if chg1h <= CHG1H_MIN: continue
-    if addr in seen:       continue
+
+    # ── 24 小时去重 ──
+    last_ts = seen.get(addr, 0)
+    if now_ts - last_ts < DEDUP_WINDOW_SEC:
+        continue
 
     candidates += 1
 
@@ -147,12 +159,15 @@ for t in all_tokens:
         print(f"[高风险过滤] {sym} 风险={risk_level}")
         continue
 
-    seen.add(addr)
+    seen[addr] = now_ts
     tag = CHAIN_LABEL.get(chain, chain.upper())
     risk_score = t.get("risk_score", "?")
 
+    is_repeat = last_ts > 0
+    flag = "🔁 <b>再次触发</b>" if is_repeat else "🔥 <b>新信号</b>"
+
     alerts.append(
-        f"🔥 <b>新信号 [{tag}]</b>\n"
+        f"{flag} [{tag}]\n"
         f"代币：<b>${sym}</b>\n"
         f"市值：{fmt(mcap)}\n"
         f"流动性：{fmt(liq)}\n"
@@ -161,12 +176,22 @@ for t in all_tokens:
         f"5M涨幅：🟢 +{chg5m:.1f}%\n"
         f"1H涨幅：🟢 +{chg1h:.1f}%\n"
         f"安全分：{risk_score} ✅\n"
-        f"🔗 <a href='https://ave.ai/token/{addr}-{chain}'>Ave.ai 查看</a>"
+        f"\n"
+        f"📋 CA(点击复制):\n"
+        f"<code>{addr}</code>\n"
+        f"\n"
+        f"🔗 <a href='https://ave.ai/token/{addr}-{chain}'>Ave.ai</a> | "
+        f"<a href='https://gmgn.ai/{chain}/token/{addr}'>GMGN</a> | "
+        f"<a href='https://dexscreener.com/{chain}/{addr}'>DEX</a>"
     )
 
 for msg in alerts:
     send_tg(msg)
     time.sleep(0.5)
 
-json.dump(list(seen)[-2000:], open(STATE_FILE, "w"))
-print(f"\n完成 | 聚合 {len(all_tokens)} | 候选 {candidates} | 推送 {len(alerts)}")
+# 清理过期记录(超过 7 天的)
+expire_ts = now_ts - 7 * 24 * 3600
+seen = {k: v for k, v in seen.items() if v > expire_ts}
+
+json.dump(seen, open(STATE_FILE, "w"))
+print(f"\n完成 | 聚合 {len(all_tokens)} | 候选 {candidates} | 推送 {len(alerts)} | 已记录 {len(seen)}")
